@@ -1,0 +1,98 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Inter', 'Noto Sans Bengali', -apple-system, BlinkMacSystemFont, sans-serif;
+    background-color: #F8FAFC;
+    color: #0F172A;
+  }
+}
+
+.font-bengali {
+  font-family: 'Noto Sans Bengali', 'Inter', sans-serif;
+}
+
+/* Waveform animation for live ambient mic */
+@keyframes waveBar {
+  0%, 100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.animate-wave-1 { animation: waveBar 0.9s ease-in-out infinite; }
+.animate-wave-2 { animation: waveBar 0.7s ease-in-out 0.15s infinite; }
+.animate-wave-3 { animation: waveBar 1.05s ease-in-out 0.3s infinite; }
+.animate-wave-4 { animation: waveBar 0.8s ease-in-out 0.45s infinite; }
+.animate-wave-5 { animation: waveBar 0.95s ease-in-out 0.2s infinite; }
+
+/* Subtle custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
+}
+
+/* Clean A4 Printing */
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 10mm;
+  }
+
+  body * {
+    visibility: hidden !important;
+  }
+
+  #printable-rx-sheet,
+  #printable-rx-sheet *,
+  body.printing-flyer #printable-flyer-card,
+  body.printing-flyer #printable-flyer-card * {
+    visibility: visible !important;
+  }
+
+  #printable-rx-sheet {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+    background: white !important;
+    z-index: 99999 !important;
+  }
+
+  body.printing-flyer #printable-rx-sheet,
+  body.printing-flyer #printable-rx-sheet * {
+    visibility: hidden !important;
+  }
+
+  body.printing-flyer #printable-flyer-card {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100% !important;
+    max-width: 720px !important;
+    margin: 0 auto !important;
+    box-shadow: none !important;
+    z-index: 99999 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+}
