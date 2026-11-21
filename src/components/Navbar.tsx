@@ -13,7 +13,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenSettings,
   onNewPatient,
 }) => {
-  const isLiveAi = !settings.demoMode && Boolean(settings.apiKey.trim());
+  const isLiveAi = !settings.demoMode;
 
   return (
     <header className="sticky top-0 z-40 border-b border-slate-200/80 bg-white/95 backdrop-blur-md no-print">

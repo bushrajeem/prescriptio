@@ -115,11 +115,11 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                   onUpdateSettings({
                     ...settings,
                     apiKey: e.target.value,
-                    demoMode: e.target.value.trim() ? false : true,
+                    demoMode: false,
                   });
                   setTestResult(null);
                 }}
-                placeholder="Paste Gemini API key..."
+                placeholder="Optional: uses built-in server AI by default"
                 className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-3.5 pr-10 font-mono text-xs text-slate-800 focus:border-[#0F766E] focus:bg-white focus:outline-none"
               />
               <button
@@ -135,7 +135,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
             <button
               type="button"
               onClick={handleTestKey}
-              disabled={testing || !settings.apiKey.trim()}
+              disabled={testing}
               className="inline-flex items-center gap-2 rounded-xl bg-[#0F766E] px-4 py-2 text-xs font-semibold text-white hover:bg-teal-800 disabled:opacity-50"
             >
               {testing ? (
@@ -147,6 +147,10 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                 'Test AI Connection'
               )}
             </button>
+
+            <p className="text-[11px] leading-relaxed text-slate-500">
+              Leave blank to use the built-in server AI automatically — visitors never need to enter an API key.
+            </p>
 
             {testResult && (
               <div

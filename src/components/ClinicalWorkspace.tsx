@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   Mic,
-  MicOff,
+  Square,
   Play,
   Sparkles,
   CheckCircle2,
@@ -22,7 +22,10 @@ import {
   BD_FORMULARY_PRESETS,
   EMPTY_PRESCRIPTION,
 } from '../data/mockClinicalData';
-import { extractClinicalFields } from '../services/aiExtractor';
+import {
+  extractClinicalFields,
+  transcribeConsultationAudio,
+} from '../services/aiExtractor';
 import { PrescriptionPrintModal } from './PrescriptionPrintModal';
 
 interface ClinicalWorkspaceProps {
@@ -57,14 +60,41 @@ function buildDefaultTranscript(): string {
   return SAMPLE_CASES[0].lines.map((l) => `${l.speaker}: ${l.text}`).join('\n\n');
 }
 
+function pickSupportedAudioMimeType(): string {
+  if (typeof MediaRecorder === 'undefined') return '';
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+    'audio/ogg;codecs=opus',
+  ];
+  for (const type of candidates) {
+    if (MediaRecorder.isTypeSupported(type)) {
+      return type;
+    }
+  }
+  return '';
+}
+
+function formatTimer(seconds: number): string {
+  const m = Math.floor(seconds / 60)
+    .toString()
+    .padStart(2, '0');
+  const s = (seconds % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
+}
+
 export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
   settings,
   onUpdateSettings,
   resetSignal,
 }) => {
   const [transcript, setTranscript] = useState<string>(() => buildDefaultTranscript());
-  const [interimText, setInterimText] = useState('');
+  const [liveCaption, setLiveCaption] = useState('');
   const [isListening, setIsListening] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [recordSeconds, setRecordSeconds] = useState(0);
+  const [micLevel, setMicLevel] = useState(0);
   const [isStreamingSample, setIsStreamingSample] = useState(false);
   const [micNote, setMicNote] = useState<string | null>(null);
 
@@ -83,8 +113,44 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
   const [showQuickMeds, setShowQuickMeds] = useState(false);
   const [isPrintOpen, setIsPrintOpen] = useState(false);
 
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const levelRafRef = useRef<number | null>(null);
+  const timerRef = useRef<number | null>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const webSpeechBackupRef = useRef<string>('');
   const streamTimerRef = useRef<number | null>(null);
+
+  const stopAudioMeterAndStream = () => {
+    if (levelRafRef.current) {
+      window.cancelAnimationFrame(levelRafRef.current);
+      levelRafRef.current = null;
+    }
+    if (timerRef.current) {
+      window.clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+    }
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+      mediaStreamRef.current = null;
+    }
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // ignore
+      }
+      recognitionRef.current = null;
+    }
+    setMicLevel(0);
+    setLiveCaption('');
+  };
 
   // Reset when doctor clicks "New Patient" in Navbar
   useEffect(() => {
@@ -93,11 +159,15 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
       window.clearInterval(streamTimerRef.current);
       streamTimerRef.current = null;
     }
-    if (isListening) {
-      recognitionRef.current?.stop();
-      setIsListening(false);
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.onstop = null;
+      mediaRecorderRef.current.stop();
     }
+    stopAudioMeterAndStream();
+    setIsListening(false);
+    setIsTranscribing(false);
     setIsStreamingSample(false);
+    setRecordSeconds(0);
     setTranscript('');
     setPrescription(EMPTY_PRESCRIPTION());
     setStatusMessage(null);
@@ -107,14 +177,14 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
 
   useEffect(() => {
     return () => {
-      try {
-        recognitionRef.current?.stop();
-      } catch {
-        // ignore
-      }
       if (streamTimerRef.current) {
         window.clearInterval(streamTimerRef.current);
       }
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.onstop = null;
+        mediaRecorderRef.current.stop();
+      }
+      stopAudioMeterAndStream();
     };
   }, []);
 
@@ -126,69 +196,201 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
     }));
   };
 
-  // --- Live Voice Input (Web Speech API) ---
-  const toggleListening = () => {
+  // --- Universal Microphone Recording (Works on Chrome, Safari, iOS, Firefox, Edge on Vercel) ---
+  const startListening = async () => {
     setMicNote(null);
-    if (isListening) {
-      recognitionRef.current?.stop();
-      setIsListening(false);
-      setInterimText('');
+    setErrorMessage(null);
+    setStatusMessage(null);
+    webSpeechBackupRef.current = '';
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setMicNote(
+        'Microphone access requires HTTPS (Vercel) and a modern browser like Chrome, Safari, or Edge.'
+      );
       return;
     }
 
-    const SpeechRecognitionCtor =
-      (window as unknown as Record<string, new () => SpeechRecognitionLike>).SpeechRecognition ||
-      (window as unknown as Record<string, new () => SpeechRecognitionLike>).webkitSpeechRecognition;
-
-    if (!SpeechRecognitionCtor) {
-      setMicNote('Voice mic works best in Chrome or Edge. You can also type or load a sample conversation.');
+    if (typeof MediaRecorder === 'undefined') {
+      setMicNote('Audio recording is not supported in this browser. Please open this link in Chrome or Safari.');
       return;
     }
 
     try {
-      const recognition = new SpeechRecognitionCtor();
-      recognition.lang = settings.speechLang;
-      recognition.continuous = true;
-      recognition.interimResults = true;
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      mediaStreamRef.current = stream;
+      audioChunksRef.current = [];
 
-      recognition.onresult = (event) => {
-        let finalPart = '';
-        let interimPart = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const r = event.results[i];
-          if (r.isFinal) {
-            finalPart += r[0].transcript + ' ';
-          } else {
-            interimPart += r[0].transcript;
+      const mimeType = pickSupportedAudioMimeType();
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+
+      recorder.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) {
+          audioChunksRef.current.push(ev.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        const blobType = recorder.mimeType || mimeType || 'audio/webm';
+        const recordedBlob = new Blob(audioChunksRef.current, { type: blobType });
+        const webSpeechBackup = webSpeechBackupRef.current.trim();
+        stopAudioMeterAndStream();
+        setIsListening(false);
+        setRecordSeconds(0);
+
+        if (recordedBlob.size < 400 && !webSpeechBackup) {
+          setMicNote('Recording was too short. Please tap Start Mic and speak clearly.');
+          return;
+        }
+
+        setIsTranscribing(true);
+        setStatusMessage('Transcribing voice with Gemini AI...');
+        try {
+          const result = await transcribeConsultationAudio(recordedBlob, {
+            apiKey: settings.apiKey,
+            lang: settings.speechLang,
+            demoMode: settings.demoMode,
+          });
+
+          const finalSpokenText = result.transcript.trim() || webSpeechBackup;
+
+          if (finalSpokenText) {
+            setTranscript((prev) =>
+              prev.trim() ? `${prev.trim()}\n\n${finalSpokenText}` : finalSpokenText
+            );
+            setStatusMessage('Voice transcribed! Click "Draft Prescription with AI" below.');
+          } else if (result.note) {
+            setMicNote(result.note);
+            setStatusMessage(null);
           }
+        } catch (err) {
+          if (webSpeechBackup) {
+            setTranscript((prev) =>
+              prev.trim() ? `${prev.trim()}\n\n${webSpeechBackup}` : webSpeechBackup
+            );
+            setStatusMessage('Voice captured! Click "Draft Prescription with AI" below.');
+          } else {
+            setErrorMessage(
+              err instanceof Error ? err.message : 'Could not transcribe voice recording.'
+            );
+            setStatusMessage(null);
+          }
+        } finally {
+          setIsTranscribing(false);
         }
-        if (finalPart.trim()) {
-          setTranscript((prev) =>
-            prev.trim() ? `${prev.trim()}\n${finalPart.trim()}` : finalPart.trim()
-          );
-        }
-        setInterimText(interimPart);
       };
 
-      recognition.onerror = (ev) => {
-        if (ev.error === 'not-allowed') {
-          setMicNote('Please allow microphone access in your browser to use voice dictation.');
-        }
-        setIsListening(false);
-        setInterimText('');
-      };
-
-      recognition.onend = () => {
-        setIsListening(false);
-        setInterimText('');
-      };
-
-      recognitionRef.current = recognition;
-      recognition.start();
+      mediaRecorderRef.current = recorder;
+      recorder.start(500);
       setIsListening(true);
-    } catch {
-      setMicNote('Could not start microphone. Try typing or clicking "Load Sample".');
+      setRecordSeconds(0);
+
+      // Live recording clock
+      timerRef.current = window.setInterval(() => {
+        setRecordSeconds((s) => s + 1);
+      }, 1000);
+
+      // Real-time microphone volume meter (proves voice is being captured!)
+      try {
+        const AudioCtx =
+          window.AudioContext ||
+          (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (AudioCtx) {
+          const ctx = new AudioCtx();
+          const source = ctx.createMediaStreamSource(stream);
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 256;
+          source.connect(analyser);
+          audioCtxRef.current = ctx;
+
+          const dataArray = new Uint8Array(analyser.frequencyBinCount);
+          const tick = () => {
+            analyser.getByteFrequencyData(dataArray);
+            let sum = 0;
+            for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+            const avg = sum / dataArray.length;
+            setMicLevel(Math.min(100, Math.round((avg / 90) * 100)));
+            levelRafRef.current = window.requestAnimationFrame(tick);
+          };
+          tick();
+        }
+      } catch {
+        // AudioContext meter is optional visual polish
+      }
+
+      // Optional silent Web Speech API live preview (never interrupts MediaRecorder on failure)
+      try {
+        const SpeechRecognitionCtor =
+          (window as unknown as Record<string, new () => SpeechRecognitionLike>)
+            .SpeechRecognition ||
+          (window as unknown as Record<string, new () => SpeechRecognitionLike>)
+            .webkitSpeechRecognition;
+
+        if (SpeechRecognitionCtor) {
+          const rec = new SpeechRecognitionCtor();
+          rec.lang = settings.speechLang;
+          rec.continuous = true;
+          rec.interimResults = true;
+          rec.onresult = (event) => {
+            let interim = '';
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+              const r = event.results[i];
+              if (r.isFinal) {
+                webSpeechBackupRef.current = `${webSpeechBackupRef.current} ${r[0].transcript}`.trim();
+              } else {
+                interim += r[0].transcript;
+              }
+            }
+            setLiveCaption(interim || webSpeechBackupRef.current.slice(-110));
+          };
+          rec.onerror = () => {
+            // Silently ignore — MediaRecorder + Gemini AI handles transcription reliably!
+          };
+          rec.start();
+          recognitionRef.current = rec;
+        }
+      } catch {
+        // Silently ignore — MediaRecorder handles all browsers cleanly
+      }
+    } catch (err) {
+      stopAudioMeterAndStream();
       setIsListening(false);
+      const name = err instanceof DOMException ? err.name : '';
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+        setMicNote(
+          'Microphone permission was blocked. Tap the lock/mic icon in your browser address bar to allow microphone access, then try again.'
+        );
+      } else if (name === 'NotFoundError') {
+        setMicNote('No microphone was found on this device. Please connect a mic or type notes below.');
+      } else {
+        setMicNote(
+          'Could not access microphone. If you opened this inside WhatsApp/Facebook, tap "Open in Chrome / Safari" first.'
+        );
+      }
+    }
+  };
+
+  const stopListening = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    } else {
+      stopAudioMeterAndStream();
+      setIsListening(false);
+    }
+  };
+
+  const toggleListening = () => {
+    if (isListening) {
+      stopListening();
+    } else {
+      void startListening();
     }
   };
 
@@ -198,12 +400,12 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
       window.clearInterval(streamTimerRef.current);
     }
     if (isListening) {
-      recognitionRef.current?.stop();
-      setIsListening(false);
+      stopListening();
     }
 
     setErrorMessage(null);
     setStatusMessage(null);
+    setMicNote(null);
     setTranscript('');
     setIsStreamingSample(true);
 
@@ -291,7 +493,7 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
     <div className="mx-auto max-w-7xl px-5 py-6 sm:px-8">
       <div className="grid grid-cols-1 gap-7 lg:grid-cols-12 items-start">
         {/* ============================================================== */}
-        {/* LEFT PANEL: STEP 1 — LISTEN & SPEAK (CALM, SIMPLE, SPACIOUS)   */}
+        {/* LEFT PANEL: STEP 1 — LISTEN & SPEAK (WORKS ON ALL BROWSERS)    */}
         {/* ============================================================== */}
         <section className="rounded-3xl border border-slate-200/80 bg-white p-6 shadow-xs lg:col-span-5 lg:sticky lg:top-24">
           <div className="flex items-center justify-between gap-3">
@@ -334,16 +536,22 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
             <button
               type="button"
               onClick={toggleListening}
-              className={`flex flex-1 items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-semibold transition-all ${
+              disabled={isTranscribing}
+              className={`flex flex-1 items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-semibold transition-all disabled:opacity-60 ${
                 isListening
                   ? 'bg-rose-600 text-white shadow-sm ring-4 ring-rose-500/15'
                   : 'bg-[#0F766E] text-white shadow-xs hover:bg-teal-800'
               }`}
             >
-              {isListening ? (
+              {isTranscribing ? (
                 <>
-                  <MicOff className="h-4 w-4" />
-                  Stop Listening
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Transcribing...
+                </>
+              ) : isListening ? (
+                <>
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                  Stop &amp; Transcribe ({formatTimer(recordSeconds)})
                 </>
               ) : (
                 <>
@@ -356,7 +564,7 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
             <button
               type="button"
               onClick={handleLoadSample}
-              disabled={isStreamingSample}
+              disabled={isStreamingSample || isListening || isTranscribing}
               className="inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-60"
             >
               {isStreamingSample ? (
@@ -368,30 +576,36 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
             </button>
           </div>
 
-          {/* Subtle Live Waveform Only When Active */}
+          {/* Real Live Mic Volume Bar While Recording */}
           {isListening && (
-            <div className="mt-3 flex items-center justify-between rounded-xl bg-rose-50 px-4 py-2.5 text-xs font-medium text-rose-700">
-              <span className="flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-rose-500 animate-pulse" />
-                Listening to consultation...
-              </span>
-              <div className="flex h-4 items-center gap-1">
-                <span className="h-full w-0.5 rounded-full bg-rose-500 animate-wave-1" />
-                <span className="h-full w-0.5 rounded-full bg-rose-500 animate-wave-2" />
-                <span className="h-full w-0.5 rounded-full bg-rose-500 animate-wave-3" />
-                <span className="h-full w-0.5 rounded-full bg-rose-500 animate-wave-4" />
+            <div className="mt-3 rounded-xl bg-rose-50 px-4 py-3 text-xs text-rose-800 space-y-2">
+              <div className="flex items-center justify-between font-semibold">
+                <span className="flex items-center gap-2">
+                  <span className="h-2 w-2 rounded-full bg-rose-500 animate-pulse" />
+                  Listening ({settings.speechLang === 'bn-BD' ? 'বাংলা + English' : 'English'})...
+                </span>
+                <span className="font-mono">{formatTimer(recordSeconds)}</span>
               </div>
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-rose-200/80">
+                <div
+                  className="h-full rounded-full bg-rose-500 transition-all duration-75"
+                  style={{ width: `${Math.max(8, micLevel)}%` }}
+                />
+              </div>
+              <p className="text-[11px] text-rose-700/90">
+                Speak naturally, then tap <strong>Stop &amp; Transcribe</strong> when done.
+              </p>
             </div>
           )}
 
-          {interimText && (
+          {liveCaption && isListening && (
             <p className="mt-2 rounded-xl bg-teal-50/70 px-3.5 py-2 font-bengali text-xs italic text-teal-800">
-              {interimText}
+              {liveCaption}
             </p>
           )}
 
           {micNote && (
-            <p className="mt-3 rounded-xl bg-amber-50 px-3.5 py-2.5 text-xs text-amber-800">
+            <p className="mt-3 rounded-xl bg-amber-50 px-3.5 py-2.5 text-xs leading-relaxed text-amber-800">
               {micNote}
             </p>
           )}
@@ -400,7 +614,7 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
           <div className="mt-5">
             <div className="mb-1.5 flex items-center justify-between">
               <label htmlFor="consult-notes" className="text-xs font-medium text-slate-500">
-                Patient conversation (you can also type or edit)
+                Patient conversation (speak with mic or type directly)
               </label>
               {transcript && (
                 <button
@@ -417,7 +631,7 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
               rows={13}
               value={transcript}
               onChange={(e) => setTranscript(e.target.value)}
-              placeholder="Press 'Start Mic' to listen in Bangla or English, or click 'Load Sample' to try an example..."
+              placeholder="Press 'Start Mic' to record in Bangla or English, or click 'Load Sample' to try an example..."
               className="font-bengali w-full resize-y rounded-2xl border border-slate-200 bg-slate-50/60 p-4 text-[14px] leading-relaxed text-slate-800 placeholder:text-slate-400 focus:border-[#0F766E] focus:bg-white focus:outline-none focus:ring-2 focus:ring-teal-500/15"
             />
           </div>
@@ -426,7 +640,7 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
           <button
             type="button"
             onClick={handleDraftPrescription}
-            disabled={isDrafting || !transcript.trim()}
+            disabled={isDrafting || isTranscribing || !transcript.trim()}
             className="mt-4 flex w-full items-center justify-center gap-2 rounded-2xl bg-[#0F766E] px-5 py-3.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isDrafting ? (
@@ -711,7 +925,7 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
               </div>
             </div>
 
-            {/* Rx Medications (Clean, Direct Inline Editing, ZERO per-row approve clutter) */}
+            {/* Rx Medications */}
             <div className="py-5">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
@@ -897,7 +1111,6 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
           {/* ============================================================== */}
           <div className="border-t border-slate-200 bg-slate-50/90 px-6 py-5">
             <div className="flex flex-col gap-3 sm:flex-row">
-              {/* The ONE Single Approve Button */}
               <button
                 type="button"
                 onClick={() =>
@@ -913,7 +1126,6 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
                 {prescription.isApproved ? 'Approved by Doctor' : 'Approve Prescription'}
               </button>
 
-              {/* Print Official Prescription (Unlocked Once Approved) */}
               <button
                 type="button"
                 disabled={!prescription.isApproved}
@@ -948,7 +1160,6 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
         </section>
       </div>
 
-      {/* Printable Official A4 Bangladeshi Prescription Modal */}
       <PrescriptionPrintModal
         isOpen={isPrintOpen}
         onClose={() => setIsPrintOpen(false)}
