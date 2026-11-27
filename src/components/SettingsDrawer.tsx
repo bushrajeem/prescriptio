@@ -7,6 +7,7 @@ import {
   Loader2,
   Eye,
   EyeOff,
+  UserRound,
 } from 'lucide-react';
 import type { AppSettings } from '../types/clinical';
 import { testGeminiApiKey } from '../services/aiExtractor';
@@ -16,6 +17,7 @@ interface SettingsDrawerProps {
   onClose: () => void;
   settings: AppSettings;
   onUpdateSettings: (next: AppSettings) => void;
+  onSwitchDoctor: () => void;
 }
 
 export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
@@ -23,6 +25,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   onClose,
   settings,
   onUpdateSettings,
+  onSwitchDoctor,
 }) => {
   const [showKey, setShowKey] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -62,13 +65,88 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
         </div>
 
         <div className="flex-1 space-y-6 overflow-y-auto px-6 py-5">
-          {/* Doctor Profile Card */}
-          <div className="rounded-2xl bg-slate-50 p-4 text-sm">
-            <p className="font-bold text-slate-900">{settings.doctorProfile.name}</p>
-            <p className="text-xs text-[#0F766E] font-medium mt-0.5">
-              {settings.doctorProfile.qualifications} • BMDC {settings.doctorProfile.bmdcReg}
-            </p>
-            <p className="text-xs text-slate-500 mt-1">{settings.doctorProfile.chamberAddress}</p>
+          {/* Editable Doctor Profile */}
+          <div className="space-y-3 rounded-2xl bg-slate-50 p-4">
+            <div className="flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-xs font-bold text-slate-700 uppercase">
+                <UserRound className="h-3.5 w-3.5 text-[#0F766E]" />
+                Doctor Profile
+              </span>
+              <button
+                type="button"
+                onClick={onSwitchDoctor}
+                className="text-xs font-semibold text-[#0F766E] hover:underline"
+              >
+                Switch Doctor
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <div>
+                <label className="text-[11px] font-medium text-slate-500">Doctor Name</label>
+                <input
+                  type="text"
+                  value={settings.doctorProfile.name}
+                  onChange={(e) =>
+                    onUpdateSettings({
+                      ...settings,
+                      doctorProfile: { ...settings.doctorProfile, name: e.target.value },
+                    })
+                  }
+                  className="mt-0.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm font-semibold text-slate-900 focus:border-[#0F766E] focus:outline-none"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[11px] font-medium text-slate-500">Degree</label>
+                  <input
+                    type="text"
+                    value={settings.doctorProfile.qualifications}
+                    onChange={(e) =>
+                      onUpdateSettings({
+                        ...settings,
+                        doctorProfile: {
+                          ...settings.doctorProfile,
+                          qualifications: e.target.value,
+                        },
+                      })
+                    }
+                    className="mt-0.5 w-full rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 focus:border-[#0F766E] focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] font-medium text-slate-500">BMDC Reg.</label>
+                  <input
+                    type="text"
+                    value={settings.doctorProfile.bmdcReg}
+                    onChange={(e) =>
+                      onUpdateSettings({
+                        ...settings,
+                        doctorProfile: { ...settings.doctorProfile, bmdcReg: e.target.value },
+                      })
+                    }
+                    className="mt-0.5 w-full rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 focus:border-[#0F766E] focus:outline-none"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="text-[11px] font-medium text-slate-500">Chamber Address</label>
+                <input
+                  type="text"
+                  value={settings.doctorProfile.chamberAddress}
+                  onChange={(e) =>
+                    onUpdateSettings({
+                      ...settings,
+                      doctorProfile: {
+                        ...settings.doctorProfile,
+                        chamberAddress: e.target.value,
+                      },
+                    })
+                  }
+                  className="mt-0.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-800 focus:border-[#0F766E] focus:outline-none"
+                />
+              </div>
+            </div>
           </div>
 
           {/* Live AI vs Offline Demo Toggle */}

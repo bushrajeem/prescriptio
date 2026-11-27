@@ -2,14 +2,33 @@ import React, { useState, useEffect } from 'react';
 import { Navbar } from './components/Navbar';
 import { SettingsDrawer } from './components/SettingsDrawer';
 import { ClinicalWorkspace } from './components/ClinicalWorkspace';
-import {
-  DEFAULT_DOCTOR_PROFILE,
-} from './data/mockClinicalData';
-import type { AppSettings } from './types/clinical';
+import { DoctorWelcomeModal } from './components/DoctorWelcomeModal';
+import { DEFAULT_DOCTOR_PROFILE } from './data/mockClinicalData';
+import type { AppSettings, DoctorProfile } from './types/clinical';
 
 const SETTINGS_STORAGE_KEY = 'prescript_io_settings_v2';
+const DOCTOR_STORAGE_KEY = 'prescript_io_doctor_v1';
 
-function loadInitialSettings(): AppSettings {
+function loadSavedDoctor(): DoctorProfile | null {
+  try {
+    const raw = localStorage.getItem(DOCTOR_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<DoctorProfile>;
+      if (typeof parsed.name === 'string' && parsed.name.trim()) {
+        return {
+          ...DEFAULT_DOCTOR_PROFILE,
+          ...parsed,
+          name: parsed.name.trim(),
+        };
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return null;
+}
+
+function loadInitialSettings(savedDoctor: DoctorProfile | null): AppSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (raw) {
@@ -21,7 +40,7 @@ function loadInitialSettings(): AppSettings {
             : '',
         demoMode: typeof parsed.demoMode === 'boolean' ? parsed.demoMode : false,
         speechLang: parsed.speechLang === 'en-US' ? 'en-US' : 'bn-BD',
-        doctorProfile: DEFAULT_DOCTOR_PROFILE,
+        doctorProfile: savedDoctor || DEFAULT_DOCTOR_PROFILE,
       };
     }
   } catch {
@@ -31,12 +50,15 @@ function loadInitialSettings(): AppSettings {
     apiKey: '',
     demoMode: false,
     speechLang: 'bn-BD',
-    doctorProfile: DEFAULT_DOCTOR_PROFILE,
+    doctorProfile: savedDoctor || DEFAULT_DOCTOR_PROFILE,
   };
 }
 
 export const App: React.FC = () => {
-  const [settings, setSettings] = useState<AppSettings>(loadInitialSettings);
+  const [savedDoctor, setSavedDoctor] = useState<DoctorProfile | null>(loadSavedDoctor);
+  const [settings, setSettings] = useState<AppSettings>(() =>
+    loadInitialSettings(savedDoctor)
+  );
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
 
@@ -53,7 +75,39 @@ export const App: React.FC = () => {
     } catch {
       // ignore
     }
-  }, [settings]);
+  }, [settings.apiKey, settings.demoMode, settings.speechLang]);
+
+  const handleCompleteOnboarding = (profile: DoctorProfile) => {
+    try {
+      localStorage.setItem(DOCTOR_STORAGE_KEY, JSON.stringify(profile));
+    } catch {
+      // ignore
+    }
+    setSavedDoctor(profile);
+    setSettings((prev) => ({ ...prev, doctorProfile: profile }));
+  };
+
+  const handleUpdateSettings = (next: AppSettings) => {
+    setSettings(next);
+    if (next.doctorProfile.name.trim()) {
+      try {
+        localStorage.setItem(DOCTOR_STORAGE_KEY, JSON.stringify(next.doctorProfile));
+      } catch {
+        // ignore
+      }
+      setSavedDoctor(next.doctorProfile);
+    }
+  };
+
+  const handleSwitchDoctor = () => {
+    try {
+      localStorage.removeItem(DOCTOR_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+    setIsSettingsOpen(false);
+    setSavedDoctor(null);
+  };
 
   return (
     <div className="min-h-screen flex flex-col bg-[#F8FAFC] text-slate-900">
@@ -66,7 +120,7 @@ export const App: React.FC = () => {
       <main className="flex-1 pb-10">
         <ClinicalWorkspace
           settings={settings}
-          onUpdateSettings={setSettings}
+          onUpdateSettings={handleUpdateSettings}
           resetSignal={resetSignal}
         />
       </main>
@@ -75,8 +129,11 @@ export const App: React.FC = () => {
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
         settings={settings}
-        onUpdateSettings={setSettings}
+        onUpdateSettings={handleUpdateSettings}
+        onSwitchDoctor={handleSwitchDoctor}
       />
+
+      {!savedDoctor && <DoctorWelcomeModal onComplete={handleCompleteOnboarding} />}
     </div>
   );
 };

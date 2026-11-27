@@ -1,9 +1,8 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Mic,
   Square,
   Play,
-  Sparkles,
   CheckCircle2,
   Lock,
   Printer,
@@ -92,13 +91,11 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
   const [transcript, setTranscript] = useState<string>(() => buildDefaultTranscript());
   const [liveCaption, setLiveCaption] = useState('');
   const [isListening, setIsListening] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [micLevel, setMicLevel] = useState(0);
   const [isStreamingSample, setIsStreamingSample] = useState(false);
   const [micNote, setMicNote] = useState<string | null>(null);
-
-  const [isDrafting, setIsDrafting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -113,15 +110,101 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
   const [showQuickMeds, setShowQuickMeds] = useState(false);
   const [isPrintOpen, setIsPrintOpen] = useState(false);
 
+  // Refs for audio recording, live rolling sync, and race-free AI extraction
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const audioMimeRef = useRef<string>('audio/webm');
   const audioCtxRef = useRef<AudioContext | null>(null);
   const levelRafRef = useRef<number | null>(null);
   const timerRef = useRef<number | null>(null);
+  const rollingAudioTimerRef = useRef<number | null>(null);
+  const isRollingAudioBusyRef = useRef(false);
+  const lastAudioChunkCountRef = useRef(0);
+  const recordingBaseTranscriptRef = useRef('');
+  const webSpeechReceivedRef = useRef(false);
+
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
-  const webSpeechBackupRef = useRef<string>('');
   const streamTimerRef = useRef<number | null>(null);
+  const debounceTimerRef = useRef<number | null>(null);
+  const extractSeqRef = useRef(0);
+  const lastExtractedTranscriptRef = useRef<string>(buildDefaultTranscript());
+  const skipNextAutoExtractRef = useRef(false);
+
+  // Always keep latest settings accessible inside async callbacks
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+
+  const syncPrescriptionFromText = useCallback(async (textToExtract: string) => {
+    const trimmed = textToExtract.trim();
+    if (trimmed.length < 8) return;
+    if (trimmed === lastExtractedTranscriptRef.current) return;
+
+    const seq = ++extractSeqRef.current;
+    lastExtractedTranscriptRef.current = trimmed;
+    setIsSyncing(true);
+    setErrorMessage(null);
+
+    try {
+      const result = await extractClinicalFields(trimmed, {
+        apiKey: settingsRef.current.apiKey,
+        demoMode: settingsRef.current.demoMode,
+      });
+      if (seq !== extractSeqRef.current) return; // Ignore stale response
+
+      setPrescription((prev) => ({
+        ...result.prescription,
+        patient: {
+          ...result.prescription.patient,
+          visitId: prev.patient.visitId || result.prescription.patient.visitId,
+          date: prev.patient.date || result.prescription.patient.date,
+        },
+        isApproved: false,
+      }));
+
+      if (result.note) {
+        setStatusMessage(result.note);
+      } else {
+        setStatusMessage(null);
+      }
+    } catch (err) {
+      if (seq === extractSeqRef.current) {
+        setErrorMessage(err instanceof Error ? err.message : 'Could not update prescription.');
+      }
+    } finally {
+      if (seq === extractSeqRef.current) {
+        setIsSyncing(false);
+      }
+    }
+  }, []);
+
+  // Automatically sync right-side Prescription Pad whenever conversation text changes
+  useEffect(() => {
+    if (isStreamingSample) return;
+    if (skipNextAutoExtractRef.current) {
+      skipNextAutoExtractRef.current = false;
+      return;
+    }
+
+    const trimmed = transcript.trim();
+    if (!trimmed || trimmed.length < 8 || trimmed === lastExtractedTranscriptRef.current) {
+      return;
+    }
+
+    if (debounceTimerRef.current) {
+      window.clearTimeout(debounceTimerRef.current);
+    }
+
+    debounceTimerRef.current = window.setTimeout(() => {
+      void syncPrescriptionFromText(trimmed);
+    }, 950);
+
+    return () => {
+      if (debounceTimerRef.current) {
+        window.clearTimeout(debounceTimerRef.current);
+      }
+    };
+  }, [transcript, isStreamingSample, syncPrescriptionFromText]);
 
   const stopAudioMeterAndStream = () => {
     if (levelRafRef.current) {
@@ -131,6 +214,10 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
     if (timerRef.current) {
       window.clearInterval(timerRef.current);
       timerRef.current = null;
+    }
+    if (rollingAudioTimerRef.current) {
+      window.clearInterval(rollingAudioTimerRef.current);
+      rollingAudioTimerRef.current = null;
     }
     if (audioCtxRef.current) {
       audioCtxRef.current.close().catch(() => {});
@@ -159,13 +246,19 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
       window.clearInterval(streamTimerRef.current);
       streamTimerRef.current = null;
     }
+    if (debounceTimerRef.current) {
+      window.clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.onstop = null;
       mediaRecorderRef.current.stop();
     }
     stopAudioMeterAndStream();
+    extractSeqRef.current += 1;
+    lastExtractedTranscriptRef.current = '';
     setIsListening(false);
-    setIsTranscribing(false);
+    setIsSyncing(false);
     setIsStreamingSample(false);
     setRecordSeconds(0);
     setTranscript('');
@@ -179,6 +272,9 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
     return () => {
       if (streamTimerRef.current) {
         window.clearInterval(streamTimerRef.current);
+      }
+      if (debounceTimerRef.current) {
+        window.clearTimeout(debounceTimerRef.current);
       }
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.onstop = null;
@@ -196,12 +292,67 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
     }));
   };
 
-  // --- Universal Microphone Recording (Works on Chrome, Safari, iOS, Firefox, Edge on Vercel) ---
+  // --- Transcribe Rolling Audio Snapshot (keeps Safari/Firefox/mobile updating live!) ---
+  const transcribeCurrentAudioSnapshot = async (isFinalStop: boolean) => {
+    if (isRollingAudioBusyRef.current && !isFinalStop) return;
+    const chunkCount = audioChunksRef.current.length;
+    if (chunkCount === 0) return;
+    if (!isFinalStop && chunkCount === lastAudioChunkCountRef.current) return;
+
+    const blob = new Blob(audioChunksRef.current, { type: audioMimeRef.current });
+    if (blob.size < 450) return;
+
+    lastAudioChunkCountRef.current = chunkCount;
+    isRollingAudioBusyRef.current = true;
+    setIsSyncing(true);
+
+    try {
+      const result = await transcribeConsultationAudio(blob, {
+        apiKey: settingsRef.current.apiKey,
+        lang: settingsRef.current.speechLang,
+        demoMode: settingsRef.current.demoMode,
+      });
+
+      const spoken = result.transcript.trim();
+      if (spoken) {
+        const base = recordingBaseTranscriptRef.current;
+        const combined = base ? `${base}\n\n${spoken}` : spoken;
+        skipNextAutoExtractRef.current = true;
+        setTranscript(combined);
+        await syncPrescriptionFromText(combined);
+      } else if (isFinalStop && result.note && !webSpeechReceivedRef.current) {
+        setMicNote(result.note);
+      }
+    } catch (err) {
+      if (isFinalStop && !webSpeechReceivedRef.current) {
+        setErrorMessage(
+          err instanceof Error ? err.message : 'Could not transcribe voice recording.'
+        );
+      }
+    } finally {
+      isRollingAudioBusyRef.current = false;
+      setIsSyncing(false);
+    }
+  };
+
+  // --- Universal Live Microphone (Simultaneously Fills Right Side While Speaking) ---
   const startListening = async () => {
     setMicNote(null);
     setErrorMessage(null);
     setStatusMessage(null);
-    webSpeechBackupRef.current = '';
+    webSpeechReceivedRef.current = false;
+    lastAudioChunkCountRef.current = 0;
+
+    // If the default sample is still sitting untouched, start fresh for the live patient
+    const isDefaultSample = transcript.trim() === buildDefaultTranscript().trim();
+    const initialBase = isDefaultSample ? '' : transcript.trim();
+    recordingBaseTranscriptRef.current = initialBase;
+    if (isDefaultSample) {
+      skipNextAutoExtractRef.current = true;
+      lastExtractedTranscriptRef.current = '';
+      setTranscript('');
+      setPrescription(EMPTY_PRESCRIPTION());
+    }
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setMicNote(
@@ -211,7 +362,9 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
     }
 
     if (typeof MediaRecorder === 'undefined') {
-      setMicNote('Audio recording is not supported in this browser. Please open this link in Chrome or Safari.');
+      setMicNote(
+        'Audio recording is not supported in this browser. Please open this link in Chrome or Safari.'
+      );
       return;
     }
 
@@ -227,6 +380,7 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
       audioChunksRef.current = [];
 
       const mimeType = pickSupportedAudioMimeType();
+      audioMimeRef.current = mimeType || 'audio/webm';
       const recorder = mimeType
         ? new MediaRecorder(stream, { mimeType })
         : new MediaRecorder(stream);
@@ -238,53 +392,13 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
       };
 
       recorder.onstop = async () => {
-        const blobType = recorder.mimeType || mimeType || 'audio/webm';
-        const recordedBlob = new Blob(audioChunksRef.current, { type: blobType });
-        const webSpeechBackup = webSpeechBackupRef.current.trim();
+        audioMimeRef.current = recorder.mimeType || mimeType || 'audio/webm';
         stopAudioMeterAndStream();
         setIsListening(false);
         setRecordSeconds(0);
 
-        if (recordedBlob.size < 400 && !webSpeechBackup) {
-          setMicNote('Recording was too short. Please tap Start Mic and speak clearly.');
-          return;
-        }
-
-        setIsTranscribing(true);
-        setStatusMessage('Transcribing voice with Gemini AI...');
-        try {
-          const result = await transcribeConsultationAudio(recordedBlob, {
-            apiKey: settings.apiKey,
-            lang: settings.speechLang,
-            demoMode: settings.demoMode,
-          });
-
-          const finalSpokenText = result.transcript.trim() || webSpeechBackup;
-
-          if (finalSpokenText) {
-            setTranscript((prev) =>
-              prev.trim() ? `${prev.trim()}\n\n${finalSpokenText}` : finalSpokenText
-            );
-            setStatusMessage('Voice transcribed! Click "Draft Prescription with AI" below.');
-          } else if (result.note) {
-            setMicNote(result.note);
-            setStatusMessage(null);
-          }
-        } catch (err) {
-          if (webSpeechBackup) {
-            setTranscript((prev) =>
-              prev.trim() ? `${prev.trim()}\n\n${webSpeechBackup}` : webSpeechBackup
-            );
-            setStatusMessage('Voice captured! Click "Draft Prescription with AI" below.');
-          } else {
-            setErrorMessage(
-              err instanceof Error ? err.message : 'Could not transcribe voice recording.'
-            );
-            setStatusMessage(null);
-          }
-        } finally {
-          setIsTranscribing(false);
-        }
+        // Final Gemini audio transcription + auto-fill pass so Bangla-English medical terms are exact
+        await transcribeCurrentAudioSnapshot(true);
       };
 
       mediaRecorderRef.current = recorder;
@@ -297,7 +411,14 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
         setRecordSeconds((s) => s + 1);
       }, 1000);
 
-      // Real-time microphone volume meter (proves voice is being captured!)
+      // Periodic rolling audio transcription & right-side fill every 5s while speaking
+      rollingAudioTimerRef.current = window.setInterval(() => {
+        if (!webSpeechReceivedRef.current) {
+          void transcribeCurrentAudioSnapshot(false);
+        }
+      }, 5000);
+
+      // Real-time microphone volume meter
       try {
         const AudioCtx =
           window.AudioContext ||
@@ -322,10 +443,10 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
           tick();
         }
       } catch {
-        // AudioContext meter is optional visual polish
+        // Optional visual meter
       }
 
-      // Optional silent Web Speech API live preview (never interrupts MediaRecorder on failure)
+      // Live Web Speech API stream for instant word-by-word simultaneous fill on Chrome/Edge/Safari
       try {
         const SpeechRecognitionCtor =
           (window as unknown as Record<string, new () => SpeechRecognitionLike>)
@@ -335,29 +456,42 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
 
         if (SpeechRecognitionCtor) {
           const rec = new SpeechRecognitionCtor();
-          rec.lang = settings.speechLang;
+          rec.lang = settingsRef.current.speechLang;
           rec.continuous = true;
           rec.interimResults = true;
+
+          let sessionSpoken = '';
           rec.onresult = (event) => {
             let interim = '';
+            let gotFinal = false;
             for (let i = event.resultIndex; i < event.results.length; i++) {
               const r = event.results[i];
               if (r.isFinal) {
-                webSpeechBackupRef.current = `${webSpeechBackupRef.current} ${r[0].transcript}`.trim();
+                sessionSpoken = `${sessionSpoken} ${r[0].transcript}`.trim();
+                gotFinal = true;
               } else {
                 interim += r[0].transcript;
               }
             }
-            setLiveCaption(interim || webSpeechBackupRef.current.slice(-110));
+
+            if (gotFinal && sessionSpoken) {
+              webSpeechReceivedRef.current = true;
+              const base = recordingBaseTranscriptRef.current;
+              const combined = base ? `${base}\n\n${sessionSpoken}` : sessionSpoken;
+              setTranscript(combined);
+            }
+            setLiveCaption(interim);
           };
+
           rec.onerror = () => {
-            // Silently ignore — MediaRecorder + Gemini AI handles transcription reliably!
+            // Silently let MediaRecorder + Gemini rolling sync handle everything
           };
+
           rec.start();
           recognitionRef.current = rec;
         }
       } catch {
-        // Silently ignore — MediaRecorder handles all browsers cleanly
+        // MediaRecorder + Gemini rolling sync handles all browsers cleanly
       }
     } catch (err) {
       stopAudioMeterAndStream();
@@ -368,7 +502,9 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
           'Microphone permission was blocked. Tap the lock/mic icon in your browser address bar to allow microphone access, then try again.'
         );
       } else if (name === 'NotFoundError') {
-        setMicNote('No microphone was found on this device. Please connect a mic or type notes below.');
+        setMicNote(
+          'No microphone was found on this device. Please connect a mic or type notes below.'
+        );
       } else {
         setMicNote(
           'Could not access microphone. If you opened this inside WhatsApp/Facebook, tap "Open in Chrome / Safari" first.'
@@ -394,23 +530,32 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
     }
   };
 
-  // --- Stream Sample Bangla-English Consultation ---
+  // --- Stream Sample Conversation & Simultaneously Fill Right-Side Boxes Line-by-Line ---
   const handleLoadSample = () => {
     if (streamTimerRef.current) {
       window.clearInterval(streamTimerRef.current);
+    }
+    if (debounceTimerRef.current) {
+      window.clearTimeout(debounceTimerRef.current);
     }
     if (isListening) {
       stopListening();
     }
 
+    const sample = SAMPLE_CASES[0];
+    const lines = sample.lines;
+    const fullData = structuredClone(sample.extractedData);
+
     setErrorMessage(null);
     setStatusMessage(null);
     setMicNote(null);
-    setTranscript('');
     setIsStreamingSample(true);
+    setIsSyncing(true);
 
-    const lines = SAMPLE_CASES[0].lines;
+    // Start from a clean slate so doctor watches both sides populate simultaneously
+    setPrescription(EMPTY_PRESCRIPTION());
     setTranscript(`${lines[0].speaker}: ${lines[0].text}`);
+
     let idx = 1;
 
     streamTimerRef.current = window.setInterval(() => {
@@ -419,41 +564,56 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
           window.clearInterval(streamTimerRef.current);
           streamTimerRef.current = null;
         }
+        const finalText = lines.map((l) => `${l.speaker}: ${l.text}`).join('\n\n');
+        lastExtractedTranscriptRef.current = finalText;
+        skipNextAutoExtractRef.current = true;
         setIsStreamingSample(false);
+        setIsSyncing(false);
         return;
       }
-      const line = lines[idx];
+
+      const currentIdx = idx;
+      const line = lines[currentIdx];
       setTranscript((prev) => `${prev}\n\n${line.speaker}: ${line.text}`);
-      idx += 1;
-    }, 450);
-  };
 
-  // --- Draft Prescription with Gemini AI ---
-  const handleDraftPrescription = async () => {
-    setErrorMessage(null);
-    setStatusMessage(null);
-    setIsDrafting(true);
-
-    try {
-      const result = await extractClinicalFields(transcript, {
-        apiKey: settings.apiKey,
-        demoMode: settings.demoMode,
-      });
-      setPrescription(result.prescription);
-      if (result.note) {
-        setStatusMessage(result.note);
-      } else {
-        setStatusMessage(
-          result.source === 'gemini'
-            ? 'Prescription drafted by Gemini AI. Please review and approve below.'
-            : 'Prescription drafted. Please review and approve below.'
-        );
+      // Simultaneously populate corresponding right-side fields as each line arrives
+      if (currentIdx === 1) {
+        setPrescription((prev) => ({
+          ...prev,
+          patient: {
+            ...prev.patient,
+            name: fullData.patient.name,
+            age: fullData.patient.age,
+            gender: fullData.patient.gender,
+          },
+          chiefComplaints: fullData.chiefComplaints.slice(0, 3),
+        }));
+      } else if (currentIdx === 3) {
+        setPrescription((prev) => ({
+          ...prev,
+          patient: {
+            ...prev.patient,
+            allergies: fullData.patient.allergies,
+          },
+          chiefComplaints: fullData.chiefComplaints,
+        }));
+      } else if (currentIdx === 4) {
+        setPrescription((prev) => ({
+          ...prev,
+          vitals: fullData.vitals,
+          investigations: fullData.investigations,
+        }));
+      } else if (currentIdx === 5) {
+        setPrescription((prev) => ({
+          ...prev,
+          medications: fullData.medications,
+          advice: fullData.advice,
+          followUp: fullData.followUp,
+        }));
       }
-    } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : 'Could not draft prescription.');
-    } finally {
-      setIsDrafting(false);
-    }
+
+      idx += 1;
+    }, 800);
   };
 
   // --- Medicine helpers ---
@@ -493,7 +653,7 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
     <div className="mx-auto max-w-7xl px-5 py-6 sm:px-8">
       <div className="grid grid-cols-1 gap-7 lg:grid-cols-12 items-start">
         {/* ============================================================== */}
-        {/* LEFT PANEL: STEP 1 — LISTEN & SPEAK (WORKS ON ALL BROWSERS)    */}
+        {/* LEFT PANEL: STEP 1 — LIVE LISTENING (AUTO-FILLS RIGHT SIDE)    */}
         {/* ============================================================== */}
         <section className="rounded-3xl border border-slate-200/80 bg-white p-6 shadow-xs lg:col-span-5 lg:sticky lg:top-24">
           <div className="flex items-center justify-between gap-3">
@@ -536,22 +696,16 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
             <button
               type="button"
               onClick={toggleListening}
-              disabled={isTranscribing}
-              className={`flex flex-1 items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-semibold transition-all disabled:opacity-60 ${
+              className={`flex flex-1 items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-semibold transition-all ${
                 isListening
                   ? 'bg-rose-600 text-white shadow-sm ring-4 ring-rose-500/15'
                   : 'bg-[#0F766E] text-white shadow-xs hover:bg-teal-800'
               }`}
             >
-              {isTranscribing ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Transcribing...
-                </>
-              ) : isListening ? (
+              {isListening ? (
                 <>
                   <Square className="h-3.5 w-3.5 fill-current" />
-                  Stop &amp; Transcribe ({formatTimer(recordSeconds)})
+                  Stop Listening ({formatTimer(recordSeconds)})
                 </>
               ) : (
                 <>
@@ -564,7 +718,7 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
             <button
               type="button"
               onClick={handleLoadSample}
-              disabled={isStreamingSample || isListening || isTranscribing}
+              disabled={isStreamingSample || isListening}
               className="inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-60"
             >
               {isStreamingSample ? (
@@ -582,7 +736,8 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
               <div className="flex items-center justify-between font-semibold">
                 <span className="flex items-center gap-2">
                   <span className="h-2 w-2 rounded-full bg-rose-500 animate-pulse" />
-                  Listening ({settings.speechLang === 'bn-BD' ? 'বাংলা + English' : 'English'})...
+                  Listening ({settings.speechLang === 'bn-BD' ? 'বাংলা + English' : 'English'}) —
+                  filling prescription live...
                 </span>
                 <span className="font-mono">{formatTimer(recordSeconds)}</span>
               </div>
@@ -592,9 +747,6 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
                   style={{ width: `${Math.max(8, micLevel)}%` }}
                 />
               </div>
-              <p className="text-[11px] text-rose-700/90">
-                Speak naturally, then tap <strong>Stop &amp; Transcribe</strong> when done.
-              </p>
             </div>
           )}
 
@@ -614,12 +766,15 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
           <div className="mt-5">
             <div className="mb-1.5 flex items-center justify-between">
               <label htmlFor="consult-notes" className="text-xs font-medium text-slate-500">
-                Patient conversation (speak with mic or type directly)
+                Speak or type — prescription pad fills automatically
               </label>
               {transcript && (
                 <button
                   type="button"
-                  onClick={() => setTranscript('')}
+                  onClick={() => {
+                    lastExtractedTranscriptRef.current = '';
+                    setTranscript('');
+                  }}
                   className="text-xs font-medium text-slate-400 hover:text-rose-600"
                 >
                   Clear
@@ -628,33 +783,13 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
             </div>
             <textarea
               id="consult-notes"
-              rows={13}
+              rows={15}
               value={transcript}
               onChange={(e) => setTranscript(e.target.value)}
-              placeholder="Press 'Start Mic' to record in Bangla or English, or click 'Load Sample' to try an example..."
+              placeholder="Press 'Start Mic' and talk naturally with your patient in Bangla or English. The prescription on the right will fill up automatically..."
               className="font-bengali w-full resize-y rounded-2xl border border-slate-200 bg-slate-50/60 p-4 text-[14px] leading-relaxed text-slate-800 placeholder:text-slate-400 focus:border-[#0F766E] focus:bg-white focus:outline-none focus:ring-2 focus:ring-teal-500/15"
             />
           </div>
-
-          {/* Primary AI Draft Button */}
-          <button
-            type="button"
-            onClick={handleDraftPrescription}
-            disabled={isDrafting || isTranscribing || !transcript.trim()}
-            className="mt-4 flex w-full items-center justify-center gap-2 rounded-2xl bg-[#0F766E] px-5 py-3.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {isDrafting ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Drafting Prescription...
-              </>
-            ) : (
-              <>
-                <Sparkles className="h-4 w-4" />
-                Draft Prescription with AI
-              </>
-            )}
-          </button>
 
           {statusMessage && (
             <p className="mt-3 text-center text-xs font-medium text-[#0F766E]">{statusMessage}</p>
@@ -673,12 +808,21 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
         <section className="overflow-hidden rounded-3xl border border-slate-200/80 bg-white shadow-xs lg:col-span-7">
           {/* Calm Top Strip */}
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/70 px-6 py-4">
-            <div>
-              <span className="text-xs font-semibold tracking-wide text-[#0F766E] uppercase">
-                Step 2
-              </span>
-              <h2 className="text-lg font-bold text-slate-900">Prescription Pad</h2>
+            <div className="flex items-center gap-3">
+              <div>
+                <span className="text-xs font-semibold tracking-wide text-[#0F766E] uppercase">
+                  Step 2
+                </span>
+                <h2 className="text-lg font-bold text-slate-900">Prescription Pad</h2>
+              </div>
+              {isSyncing && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-teal-50 px-2.5 py-1 text-xs font-semibold text-[#0F766E]">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Auto-filling live...
+                </span>
+              )}
             </div>
+
             <span
               className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold ${
                 prescription.isApproved
@@ -973,7 +1117,7 @@ export const ClinicalWorkspace: React.FC<ClinicalWorkspaceProps> = ({
               <div className="mt-3 space-y-2.5">
                 {prescription.medications.length === 0 ? (
                   <p className="rounded-2xl border border-dashed border-slate-200 py-5 text-center text-xs text-slate-400">
-                    No medicines yet. Click &ldquo;Draft Prescription with AI&rdquo; or &ldquo;Add Medicine&rdquo;.
+                    Medicines will appear here automatically as you speak, or click &ldquo;Add Medicine&rdquo;.
                   </p>
                 ) : (
                   prescription.medications.map((med, idx) => (
