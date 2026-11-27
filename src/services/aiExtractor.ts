@@ -28,12 +28,12 @@ Convert the Bangla-English doctor-patient conversation into a clean, concise pre
 Return ONLY valid JSON with this exact schema:
 {
   "patient": {
-    "name": "string (or 'Walk-in Patient')",
-    "age": "string (e.g., '34 yrs')",
+    "name": "string (patient name if mentioned, else '')",
+    "age": "string (e.g., '34 yrs', else '')",
     "gender": "Male" | "Female" | "Other",
-    "allergies": "string (e.g., 'No known drug allergies')"
+    "allergies": "string (e.g., 'No known drug allergies', else '')"
   },
-  "chiefComplaints": ["short clear symptom string"],
+  "chiefComplaints": ["specific short symptom bullet (2-6 words each)"],
   "vitals": {
     "bp": "string",
     "pulse": "string",
@@ -55,7 +55,11 @@ Return ONLY valid JSON with this exact schema:
   "advice": ["short patient advice"],
   "followUp": "short follow-up instruction"
 }
-Keep every item concise and easy for a busy doctor to read at a glance. Preserve Bangladeshi brand names mentioned by the doctor.`;
+STRICT RULES:
+1. chiefComplaints MUST contain ONLY specific medical symptoms or patient complaints as short bullet items (2-6 words each, one symptom per item — e.g., "Fever (101°F) for 3 days", "Dry cough", "Headache", "Acidity / heartburn").
+2. NEVER copy full sentences, greetings, doctor questions, or the entire conversation into chiefComplaints.
+3. If no symptoms or complaints have been mentioned yet, return "chiefComplaints": [].
+4. Only extract fields actually mentioned in the conversation; leave unmentioned fields empty. Preserve Bangladeshi brand names mentioned by the doctor.`;
 
 function generateVisitId(): string {
   return `RX-BD-${Math.floor(4000 + Math.random() * 5999)}`;
@@ -269,17 +273,101 @@ Rules:
   );
 }
 
+const SYMPTOM_PATTERNS: Array<{ label: string; regex: RegExp }> = [
+  { label: 'Fever', regex: /\b(fever|febrile|pyrexia|high temp)\b|জ্বর/i },
+  { label: 'Dry cough', regex: /\b(dry cough)\b|শুকনা কাশি|শুকনো কাশি/i },
+  { label: 'Cough', regex: /\b(cough|coughing)\b|কাশি/i },
+  { label: 'Body ache', regex: /\b(body ?ache|myalgia|muscle pain|body pain)\b|শরীর(?:ে|ের)? ব্যথা|গায়ে ব্যথা/i },
+  { label: 'Headache', regex: /\b(headache|migraine|head pain)\b|মাথা ব্যথা/i },
+  { label: 'Acidity / heartburn', regex: /\b(acidity|heartburn|acid reflux|gastric|gerd|gas)\b|এসিডিটি|বুক জ্বালাপোড়া|গ্যাস/i },
+  { label: 'Chest pain', regex: /\b(chest pain|chest tightness|chest discomfort)\b|বুক(?:ে|ের)? ব্যথা/i },
+  { label: 'Shortness of breath', regex: /\b(shortness of breath|breathlessness|dyspnea|breathing problem|asthma)\b|শ্বাসকষ্ট/i },
+  { label: 'Sore throat', regex: /\b(sore throat|throat pain)\b|গলা ব্যথা/i },
+  { label: 'Cold / runny nose', regex: /\b(cold|runny nose|nasal congestion|sneezing)\b|সর্দি|নাক বন্ধ|হাঁচি/i },
+  { label: 'Abdominal pain', regex: /\b(abdominal pain|stomach pain|stomach ache|belly pain)\b|পেট(?:ে|ের)? ব্যথা/i },
+  { label: 'Nausea', regex: /\b(nausea|nauseous)\b|বমি ভাব/i },
+  { label: 'Vomiting', regex: /\b(vomit|vomiting)\b|বমি(?! ভাব)/i },
+  { label: 'Diarrhea / loose motion', regex: /\b(diarrhea|diarrhoea|loose motion)\b|পাতলা পায়খানা|ডায়রিয়া/i },
+  { label: 'Dizziness / vertigo', regex: /\b(dizziness|dizzy|vertigo|lightheaded)\b|মাথা ঘোরা/i },
+  { label: 'Weakness / fatigue', regex: /\b(weakness|fatigue|tiredness|lethargy)\b|দুর্বলতা|ক্লান্তি/i },
+  { label: 'Back pain', regex: /\b(back pain|lower back pain|backache)\b|কোমর(?:ে|ের)? ব্যথা|পিঠ(?:ে|ের)? ব্যথা/i },
+  { label: 'Joint pain', regex: /\b(joint pain|knee pain|arthritis)\b|গিঁটে ব্যথা|হাঁটু ব্যথা/i },
+  { label: 'Skin rash / itching', regex: /\b(rash|itching|itchy|allergy rash|hives)\b|চুলকানি|র‍্যাশ|ফুসকুড়ি/i },
+  { label: 'Insomnia / poor sleep', regex: /\b(insomnia|can'?t sleep|sleeplessness)\b|ঘুম না আসা|ঘুম কম/i },
+  { label: 'Loss of appetite', regex: /\b(loss of appetite|no appetite|anorexia)\b|ক্ষুধামন্দা|খাবারে অরুচি/i },
+  { label: 'Burning urination', regex: /\b(burning urination|painful urination|uti)\b|প্রস্রাবে জ্বালাপোড়া/i },
+];
+
+function extractSpecificSymptoms(transcript: string): string[] {
+  const found: string[] = [];
+  const durationMatch = transcript.match(
+    /(?:for|since|past|last|গত)?\s*(\d+|[০-৯]+)\s*(days?|weeks?|months?|hours?|দিন|সপ্তাহ|মাস)/i
+  );
+  const durationSuffix = durationMatch
+    ? ` (${durationMatch[1].replace(/[০-৯]/g, (d) => String('০১২৩৪৫৬৭৮৯'.indexOf(d)))} ${
+        /সপ্তাহ|week/i.test(durationMatch[2])
+          ? 'weeks'
+          : /মাস|month/i.test(durationMatch[2])
+            ? 'months'
+            : /hour/i.test(durationMatch[2])
+              ? 'hours'
+              : 'days'
+      })`
+    : '';
+
+  const tempMatch = transcript.match(/\b(99|100|101|102|103|104|105)(?:\.\d)?\s*°?\s*f?\b|([৯][৯]|১০০|১০১|১০২|১০৩|১০৪)\s*ডিগ্রি/i);
+
+  for (const item of SYMPTOM_PATTERNS) {
+    if (item.label === 'Cough' && found.some((f) => f.startsWith('Dry cough'))) {
+      continue;
+    }
+    if (item.regex.test(transcript)) {
+      if (item.label === 'Fever') {
+        const tempVal = tempMatch
+          ? (tempMatch[1] || tempMatch[2] || '').replace(/[০-৯]/g, (d) =>
+              String('০১২৩৪৫৬৭৮৯'.indexOf(d))
+            )
+          : '';
+        const tempPart = tempVal ? ` (${tempVal}°F)` : '';
+        found.push(`Fever${tempPart}${durationSuffix}`);
+      } else {
+        found.push(item.label);
+      }
+    }
+  }
+
+  return found;
+}
+
+function sanitizeComplaints(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const cleaned: string[] = [];
+  for (const entry of raw) {
+    const str = String(entry || '')
+      .replace(/^(doctor|patient|doc|pt)\s*:\s*/i, '')
+      .replace(/^[-•*\d.)\s]+/, '')
+      .trim();
+    if (!str) continue;
+    // Skip accidental full-dialogue lines or greetings
+    if (/^(assalamu|walaikum|hello|hi doctor|good morning|good evening|আসসালামু|ওয়ালাইকুম)/i.test(str)) {
+      continue;
+    }
+    if (str.length > 90 && (str.includes('?') || str.includes('।') || str.includes('.'))) {
+      continue;
+    }
+    cleaned.push(str);
+  }
+  return Array.from(new Set(cleaned));
+}
+
 function runLocalFallback(transcript: string): ClinicalPrescription {
   const lower = transcript.toLowerCase();
-  if (
-    lower.includes('napa') ||
-    lower.includes('seclo') ||
-    lower.includes('fexo') ||
+  const isDefaultSample =
     lower.includes('তারিকুল') ||
     lower.includes('tariqul') ||
-    lower.includes('জ্বর') ||
-    lower.includes('fever')
-  ) {
+    (lower.includes('napa') && lower.includes('seclo') && lower.includes('fexo'));
+
+  if (isDefaultSample) {
     const base = structuredClone(SAMPLE_CASES[0].extractedData);
     return {
       ...base,
@@ -289,37 +377,34 @@ function runLocalFallback(transcript: string): ClinicalPrescription {
     };
   }
 
+  const bpMatch = transcript.match(/\bbp\s*[:\-]?\s*(\d{2,3}\s*\/\s*\d{2,3})/i);
+  const pulseMatch = transcript.match(/\bpulse\s*[:\-]?\s*(\d{2,3})/i);
+  const spo2Match = transcript.match(/\bspo2\s*[:\-]?\s*(\d{2,3}%?)/i);
+
   return {
     patient: {
-      name: 'Walk-in Patient',
-      age: '—',
+      name: '',
+      age: '',
       gender: 'Male',
       date: getTodayFormatted(),
       visitId: generateVisitId(),
-      allergies: 'None reported',
+      allergies: /no\s+(?:known\s+)?(?:drug\s+)?allerg|অ্যালার্জি\s*নেই/i.test(transcript)
+        ? 'No known drug allergies'
+        : '',
     },
-    chiefComplaints: [transcript.trim().slice(0, 90) || 'General consultation'],
+    chiefComplaints: extractSpecificSymptoms(transcript),
     vitals: {
-      bp: '120/80 mmHg',
-      pulse: '78 bpm',
-      temp: '98.6 °F',
-      spo2: '98%',
-      weight: '—',
-      physicalFindings: 'Routine exam',
+      bp: bpMatch ? `${bpMatch[1].replace(/\s+/g, '')} mmHg` : '',
+      pulse: pulseMatch ? `${pulseMatch[1]} bpm` : '',
+      temp: '',
+      spo2: spo2Match ? (spo2Match[1].endsWith('%') ? spo2Match[1] : `${spo2Match[1]}%`) : '',
+      weight: '',
+      physicalFindings: '',
     },
     investigations: [],
-    medications: [
-      {
-        id: `med-${Date.now()}-1`,
-        brand: 'Tab. Napa 500mg',
-        generic: 'Paracetamol',
-        dosage: '1+0+1',
-        timing: 'After meal',
-        duration: '5 days',
-      },
-    ],
-    advice: ['Adequate rest and hydration.'],
-    followUp: 'Review after 5 days if needed',
+    medications: [],
+    advice: [],
+    followUp: '',
     isApproved: false,
     extractionSource: 'demo',
   };
@@ -410,22 +495,26 @@ export async function extractClinicalFields(
           ? 'Other'
           : 'Male';
 
+      const parsedComplaints = sanitizeComplaints(parsed.chiefComplaints);
+      const chiefComplaints =
+        parsedComplaints.length > 0 ? parsedComplaints : extractSpecificSymptoms(transcript);
+
       const prescription: ClinicalPrescription = {
         patient: {
-          name: parsed?.patient?.name || 'Walk-in Patient',
-          age: parsed?.patient?.age || '—',
+          name: parsed?.patient?.name || '',
+          age: parsed?.patient?.age || '',
           gender,
           date: getTodayFormatted(),
           visitId: generateVisitId(),
-          allergies: parsed?.patient?.allergies || 'No known drug allergies',
+          allergies: parsed?.patient?.allergies || '',
         },
-        chiefComplaints: Array.isArray(parsed.chiefComplaints) ? parsed.chiefComplaints : [],
+        chiefComplaints,
         vitals: {
-          bp: parsed?.vitals?.bp || '—',
-          pulse: parsed?.vitals?.pulse || '—',
-          temp: parsed?.vitals?.temp || '—',
-          spo2: parsed?.vitals?.spo2 || '—',
-          weight: parsed?.vitals?.weight || '—',
+          bp: parsed?.vitals?.bp || '',
+          pulse: parsed?.vitals?.pulse || '',
+          temp: parsed?.vitals?.temp || '',
+          spo2: parsed?.vitals?.spo2 || '',
+          weight: parsed?.vitals?.weight || '',
           physicalFindings: parsed?.vitals?.physicalFindings || '',
         },
         investigations: Array.isArray(parsed.investigations) ? parsed.investigations : [],

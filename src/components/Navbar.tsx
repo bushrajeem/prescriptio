@@ -28,17 +28,26 @@ export const Navbar: React.FC<NavbarProps> = ({
               <span className="text-lg font-bold tracking-tight text-slate-900">
                 Prescript<span className="text-[#0F766E]">.io</span>
               </span>
-              <span className="hidden h-4 w-px bg-slate-200 sm:inline-block" />
-              <span className="hidden text-sm font-medium text-slate-600 sm:inline">
-                {settings.doctorProfile.name}
-              </span>
-              <span className="hidden rounded-full bg-teal-50 px-2.5 py-0.5 text-xs font-medium text-[#0F766E] md:inline">
-                BMDC {settings.doctorProfile.bmdcReg}
-              </span>
+              {settings.doctorProfile.name && (
+                <>
+                  <span className="hidden h-4 w-px bg-slate-200 sm:inline-block" />
+                  <span className="hidden text-sm font-medium text-slate-600 sm:inline">
+                    {settings.doctorProfile.name}
+                  </span>
+                </>
+              )}
+              {settings.doctorProfile.bmdcReg && (
+                <span className="hidden rounded-full bg-teal-50 px-2.5 py-0.5 text-xs font-medium text-[#0F766E] md:inline">
+                  BMDC {settings.doctorProfile.bmdcReg}
+                </span>
+              )}
             </div>
-            <p className="text-xs text-slate-500 sm:hidden">
-              {settings.doctorProfile.name} • BMDC {settings.doctorProfile.bmdcReg}
-            </p>
+            {settings.doctorProfile.name && (
+              <p className="text-xs text-slate-500 sm:hidden">
+                {settings.doctorProfile.name}
+                {settings.doctorProfile.bmdcReg ? ` • BMDC ${settings.doctorProfile.bmdcReg}` : ''}
+              </p>
+            )}
           </div>
         </div>
 

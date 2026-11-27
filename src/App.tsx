@@ -3,11 +3,21 @@ import { Navbar } from './components/Navbar';
 import { SettingsDrawer } from './components/SettingsDrawer';
 import { ClinicalWorkspace } from './components/ClinicalWorkspace';
 import { DoctorWelcomeModal } from './components/DoctorWelcomeModal';
-import { DEFAULT_DOCTOR_PROFILE } from './data/mockClinicalData';
 import type { AppSettings, DoctorProfile } from './types/clinical';
 
 const SETTINGS_STORAGE_KEY = 'prescript_io_settings_v2';
 const DOCTOR_STORAGE_KEY = 'prescript_io_doctor_v1';
+
+const BLANK_DOCTOR_PROFILE: DoctorProfile = {
+  name: '',
+  qualifications: '',
+  specialty: '',
+  bmdcReg: '',
+  chamberName: '',
+  chamberAddress: '',
+  visitingHours: '',
+  phone: '',
+};
 
 function loadSavedDoctor(): DoctorProfile | null {
   try {
@@ -16,7 +26,7 @@ function loadSavedDoctor(): DoctorProfile | null {
       const parsed = JSON.parse(raw) as Partial<DoctorProfile>;
       if (typeof parsed.name === 'string' && parsed.name.trim()) {
         return {
-          ...DEFAULT_DOCTOR_PROFILE,
+          ...BLANK_DOCTOR_PROFILE,
           ...parsed,
           name: parsed.name.trim(),
         };
@@ -40,7 +50,7 @@ function loadInitialSettings(savedDoctor: DoctorProfile | null): AppSettings {
             : '',
         demoMode: typeof parsed.demoMode === 'boolean' ? parsed.demoMode : false,
         speechLang: parsed.speechLang === 'en-US' ? 'en-US' : 'bn-BD',
-        doctorProfile: savedDoctor || DEFAULT_DOCTOR_PROFILE,
+        doctorProfile: savedDoctor || BLANK_DOCTOR_PROFILE,
       };
     }
   } catch {
@@ -50,7 +60,7 @@ function loadInitialSettings(savedDoctor: DoctorProfile | null): AppSettings {
     apiKey: '',
     demoMode: false,
     speechLang: 'bn-BD',
-    doctorProfile: savedDoctor || DEFAULT_DOCTOR_PROFILE,
+    doctorProfile: savedDoctor || BLANK_DOCTOR_PROFILE,
   };
 }
 
@@ -107,6 +117,7 @@ export const App: React.FC = () => {
     }
     setIsSettingsOpen(false);
     setSavedDoctor(null);
+    setSettings((prev) => ({ ...prev, doctorProfile: BLANK_DOCTOR_PROFILE }));
   };
 
   return (

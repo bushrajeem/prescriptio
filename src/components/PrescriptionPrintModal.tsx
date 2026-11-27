@@ -25,7 +25,9 @@ export const PrescriptionPrintModal: React.FC<PrescriptionPrintModalProps> = ({
 }) => {
   if (!isOpen) return null;
 
-  const verificationCode = `PRX-BD-${doctor.bmdcReg}-${prescription.patient.visitId}`;
+  const verificationCode = doctor.bmdcReg
+    ? `PRX-BD-${doctor.bmdcReg}-${prescription.patient.visitId}`
+    : `PRX-BD-${prescription.patient.visitId}`;
   const approvalTimestamp = new Date().toLocaleString('en-GB', {
     day: '2-digit',
     month: 'short',
@@ -94,28 +96,47 @@ export const PrescriptionPrintModal: React.FC<PrescriptionPrintModalProps> = ({
                   <h1 className="mt-2 text-2xl font-extrabold tracking-tight text-slate-900">
                     {doctor.name}
                   </h1>
-                  <p className="text-sm font-semibold text-[#0F766E]">{doctor.qualifications}</p>
-                  <p className="text-xs font-medium text-slate-600">{doctor.specialty}</p>
-                  <p className="mt-1 inline-block rounded border border-teal-200 bg-teal-50 px-2 py-0.5 font-mono text-xs font-bold text-teal-900">
-                    BMDC Reg. No: {doctor.bmdcReg}
-                  </p>
+                  {doctor.qualifications && (
+                    <p className="text-sm font-semibold text-[#0F766E]">{doctor.qualifications}</p>
+                  )}
+                  {doctor.specialty && (
+                    <p className="text-xs font-medium text-slate-600">{doctor.specialty}</p>
+                  )}
+                  {doctor.bmdcReg && (
+                    <p className="mt-1 inline-block rounded border border-teal-200 bg-teal-50 px-2 py-0.5 font-mono text-xs font-bold text-teal-900">
+                      BMDC Reg. No: {doctor.bmdcReg}
+                    </p>
+                  )}
                 </div>
 
-                <div className="text-left text-xs text-slate-600 sm:text-right space-y-1">
-                  <p className="text-sm font-bold text-slate-900">{doctor.chamberName}</p>
-                  <p className="flex items-center gap-1.5 sm:justify-end">
-                    <MapPin className="h-3.5 w-3.5 text-[#0F766E] shrink-0" />
-                    <span>{doctor.chamberAddress}</span>
-                  </p>
-                  <p className="flex items-center gap-1.5 sm:justify-end">
-                    <Clock className="h-3.5 w-3.5 text-[#0F766E] shrink-0" />
-                    <span>{doctor.visitingHours}</span>
-                  </p>
-                  <p className="flex items-center gap-1.5 sm:justify-end">
-                    <Phone className="h-3.5 w-3.5 text-[#0F766E] shrink-0" />
-                    <span>{doctor.phone}</span>
-                  </p>
-                </div>
+                {(doctor.chamberName ||
+                  doctor.chamberAddress ||
+                  doctor.visitingHours ||
+                  doctor.phone) && (
+                  <div className="text-left text-xs text-slate-600 sm:text-right space-y-1">
+                    {doctor.chamberName && (
+                      <p className="text-sm font-bold text-slate-900">{doctor.chamberName}</p>
+                    )}
+                    {doctor.chamberAddress && (
+                      <p className="flex items-center gap-1.5 sm:justify-end">
+                        <MapPin className="h-3.5 w-3.5 text-[#0F766E] shrink-0" />
+                        <span>{doctor.chamberAddress}</span>
+                      </p>
+                    )}
+                    {doctor.visitingHours && (
+                      <p className="flex items-center gap-1.5 sm:justify-end">
+                        <Clock className="h-3.5 w-3.5 text-[#0F766E] shrink-0" />
+                        <span>{doctor.visitingHours}</span>
+                      </p>
+                    )}
+                    {doctor.phone && (
+                      <p className="flex items-center gap-1.5 sm:justify-end">
+                        <Phone className="h-3.5 w-3.5 text-[#0F766E] shrink-0" />
+                        <span>{doctor.phone}</span>
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -311,9 +332,13 @@ export const PrescriptionPrintModal: React.FC<PrescriptionPrintModalProps> = ({
                     <p className="mt-1 font-serif text-base font-bold italic text-slate-900">
                       {doctor.name}
                     </p>
-                    <p className="text-[10px] font-semibold text-slate-600">
-                      {doctor.qualifications} • BMDC Reg: {doctor.bmdcReg}
-                    </p>
+                    {(doctor.qualifications || doctor.bmdcReg) && (
+                      <p className="text-[10px] font-semibold text-slate-600">
+                        {[doctor.qualifications, doctor.bmdcReg ? `BMDC Reg: ${doctor.bmdcReg}` : '']
+                          .filter(Boolean)
+                          .join(' • ')}
+                      </p>
+                    )}
                   </div>
                 </div>
               </div>

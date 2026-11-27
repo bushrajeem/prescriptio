@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { Stethoscope, ArrowRight } from 'lucide-react';
 import type { DoctorProfile } from '../types/clinical';
-import { DEFAULT_DOCTOR_PROFILE } from '../data/mockClinicalData';
 
 interface DoctorWelcomeModalProps {
   onComplete: (profile: DoctorProfile) => void;
@@ -21,11 +20,14 @@ export const DoctorWelcomeModal: React.FC<DoctorWelcomeModalProps> = ({ onComple
     const formattedName = /^dr\.?\s/i.test(trimmedName) ? trimmedName : `Dr. ${trimmedName}`;
 
     onComplete({
-      ...DEFAULT_DOCTOR_PROFILE,
       name: formattedName,
-      qualifications: qualifications.trim() || DEFAULT_DOCTOR_PROFILE.qualifications,
-      bmdcReg: bmdcReg.trim() || DEFAULT_DOCTOR_PROFILE.bmdcReg,
-      chamberAddress: chamberAddress.trim() || DEFAULT_DOCTOR_PROFILE.chamberAddress,
+      qualifications: qualifications.trim(),
+      specialty: '',
+      bmdcReg: bmdcReg.trim(),
+      chamberName: '',
+      chamberAddress: chamberAddress.trim(),
+      visitingHours: '',
+      phone: '',
     });
   };
 
